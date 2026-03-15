@@ -1,7 +1,7 @@
 # 🛰️ Automated Farm Vegetation Monitor — Version 1.0
 
-> **Zero-touch satellite monitoring for farm plots.**
-> Every time a new Sentinel-2 satellite passes over your farm, this system automatically detects it, computes 6 vegetation & moisture indices entirely on Google Earth Engine's cloud, stitches professional heatmap images, and delivers them directly to your phone via Telegram — with no manual intervention whatsoever.
+> **Automated satellite monitoring for farm plots.**
+> Every time Sentinel-2 satellite passes over your farm, this system automatically detects it, computes 6 vegetation & moisture indices entirely on Google Earth Engine's cloud, stitches professional heatmap images, and delivers them directly to your phone via Telegram — with no manual intervention whatsoever.
 
 ---
 
