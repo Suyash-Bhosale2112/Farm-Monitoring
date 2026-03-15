@@ -1,0 +1,6 @@
+earthengine-api>=0.1.370
+geopandas>=0.14
+shapely>=2.0
+Pillow>=10.0
+python-telegram-bot>=20.0
+requests>=2.31
