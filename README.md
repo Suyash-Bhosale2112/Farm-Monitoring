@@ -262,7 +262,7 @@ Each Telegram message contains one image for one farm plot:
 
 | Version | Date | Changes |
 |---------|------|---------|
-| **v1.0** | March 2026 | Initial release — 6 indices, Telegram delivery, GitHub Actions automation, industry-standard colour palettes with legends |
+| **v1.0** | 15 March 2026 | Initial release — 6 indices, Telegram delivery, GitHub Actions automation, industry-standard colour palettes with legends |
 
 ---
 
