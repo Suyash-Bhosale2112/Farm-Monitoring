@@ -167,13 +167,10 @@ This is the **most important step.** Your service account key and Telegram crede
 
 | Secret Name | Value to Paste | Where to Get It |
 |-------------|---------------|----------------|
-| `GEE_SERVICE_ACCOUNT_KEY` | The **entire contents** of `suyash-484207-803661abb1a7.json` (open it in Notepad, select all, copy) | Your Google Cloud Console → IAM → Service Accounts → Keys |
-| `TELEGRAM_BOT_TOKEN` | `8717461461:AAG3fZCEs-CyGfYHZIu3lhrVvy7Dg2i7Xy0` | BotFather on Telegram |
-| `TELEGRAM_CHAT_ID` | `1411008960` | Your Telegram user ID (auto-detected from `/start` message) |
+| `GEE_SERVICE_ACCOUNT_KEY` | The **entire contents** of `xxxxxxxxxxxxxxxxxxxxx` (open it in Notepad, select all, copy) | Your Google Cloud Console → IAM → Service Accounts → Keys |
+| `TELEGRAM_BOT_TOKEN` | `xxxxxxxxxxxxxxxxxxxx` | BotFather on Telegram |
+| `TELEGRAM_CHAT_ID` | `xxxxxxx` | Your Telegram user ID (auto-detected from `/start` message) |
 
-> ⚠️ **SECURITY WARNING:** Never commit `suyash-484207-803661abb1a7.json` to GitHub. The `.gitignore` file in this project prevents this by blocking all `*.json` files. The service account key must only exist as a GitHub Secret.
-
----
 
 ### Step 5: Verify the Workflow File is Present
 
