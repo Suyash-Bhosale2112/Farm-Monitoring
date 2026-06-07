@@ -1,0 +1,10 @@
+# Secrets and keys — never commit these
+*.json
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
