@@ -86,7 +86,7 @@ def get_latest_image(aoi):
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
           .filterBounds(aoi)
           .filterDate(start, end)
-          .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
+          .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
           .map(prep_s2)
     )
     
@@ -94,7 +94,7 @@ def get_latest_image(aoi):
         ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
           .filterBounds(aoi)
           .filterDate(start, end)
-          .filter(ee.Filter.lt("CLOUD_COVER", 20))
+          .filter(ee.Filter.lt("CLOUD_COVER", 30))
           .map(prep_landsat)
     )
     
@@ -102,7 +102,7 @@ def get_latest_image(aoi):
         ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
           .filterBounds(aoi)
           .filterDate(start, end)
-          .filter(ee.Filter.lt("CLOUD_COVER", 20))
+          .filter(ee.Filter.lt("CLOUD_COVER", 30))
           .map(prep_landsat)
     )
 
@@ -124,22 +124,22 @@ def process_image(img, aoi):
     # Resample to 2m before computing indices for smooth boundaries
     # We must get the projection from a specific band because Sentinel-2/Landsat bands have different native scales.
     crs = img.select('NIR').projection()
-    img_2m = img.resample('bilinear').reproject(crs=crs, scale=2).clip(aoi)
+    img_5m = img.resample('bilinear').reproject(crs=crs, scale=5).clip(aoi)
 
-    ndvi = img_2m.normalizedDifference(['NIR', 'RED']).rename('NDVI')
-    ndmi = img_2m.normalizedDifference(['NIR', 'SWIR1']).rename('NDMI')
-    ndwi = img_2m.normalizedDifference(['GREEN', 'NIR']).rename('NDWI')
-    ndre = img_2m.normalizedDifference(['NIR', 'RE1']).rename('NDRE')
-    evi  = img_2m.expression(
+    ndvi = img_5m.normalizedDifference(['NIR', 'RED']).rename('NDVI')
+    ndmi = img_5m.normalizedDifference(['NIR', 'SWIR1']).rename('NDMI')
+    ndwi = img_5m.normalizedDifference(['GREEN', 'NIR']).rename('NDWI')
+    ndre = img_5m.normalizedDifference(['NIR', 'RE1']).rename('NDRE')
+    evi  = img_5m.expression(
         '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
-        {'NIR': img_2m.select('NIR'), 'RED': img_2m.select('RED'), 'BLUE': img_2m.select('BLUE')}
+        {'NIR': img_5m.select('NIR'), 'RED': img_5m.select('RED'), 'BLUE': img_5m.select('BLUE')}
     ).rename('EVI')
-    gci  = img_2m.expression(
+    gci  = img_5m.expression(
         '(NIR / GREEN) - 1',
-        {'NIR': img_2m.select('NIR'), 'GREEN': img_2m.select('GREEN')}
+        {'NIR': img_5m.select('NIR'), 'GREEN': img_5m.select('GREEN')}
     ).rename('GCI')
 
-    return img_2m.addBands([ndvi, ndmi, ndwi, ndre, evi, gci])
+    return img_5m.addBands([ndvi, ndmi, ndwi, ndre, evi, gci])
 
 
 # ── Colour Palette Configuration ──────────────────────────────────────────────
@@ -150,7 +150,7 @@ def process_image(img, aoi):
 INDEX_CONFIG = {
     # Red (stressed) → Yellow (moderate) → Dark Green (dense healthy crop)
     'NDVI': {
-        'min': 0.1, 'max': 0.9,
+        'min': 0.0, 'max': 0.9,
         'palette': [
             '#a50026', '#d73027', '#f46d43', '#fdae61',
             '#fee090', '#fffab5', '#d9ef8b', '#a6d96a',
@@ -159,7 +159,7 @@ INDEX_CONFIG = {
     },
     # Dark Red (drought) → Yellow (moderate) → Dark Blue (waterlogged)
     'NDMI': {
-        'min': -0.4, 'max': 0.6,
+        'min': -0.6, 'max': 0.6,
         'palette': [
             '#8c0d25', '#c1440e', '#e87233', '#f5b26b',
             '#ffffcc', '#c7e9b4', '#7fcdbb', '#41b6c4',
@@ -168,7 +168,7 @@ INDEX_CONFIG = {
     },
     # Brown (very dry soil) → White (dry vegetation) → Teal (water body)
     'NDWI': {
-        'min': -0.3, 'max': 0.4,
+        'min': -0.3, 'max': 0.5,
         'palette': [
             '#543005', '#8c510a', '#bf812d', '#dfc27d',
             '#f6e8c3', '#f5f5f5', '#c7eae5', '#80cdc1',
@@ -177,7 +177,7 @@ INDEX_CONFIG = {
     },
     # Red Edge chlorophyll: Red (low) → Yellow → Dark Green (high canopy)
     'NDRE': {
-        'min': 0.1, 'max': 0.7,
+        'min': 0.0, 'max': 0.7,
         'palette': [
             '#a50026', '#d73027', '#f46d43', '#fdae61',
             '#fee090', '#fffab5', '#d9ef8b', '#a6d96a',
@@ -186,7 +186,7 @@ INDEX_CONFIG = {
     },
     # Enhanced Vegetation Index — less atmosphere noise than NDVI
     'EVI': {
-        'min': 0.1, 'max': 0.7,
+        'min': 0.0, 'max': 0.7,
         'palette': [
             '#a50026', '#d73027', '#f46d43', '#fdae61',
             '#fee090', '#fffab5', '#d9ef8b', '#a6d96a',
