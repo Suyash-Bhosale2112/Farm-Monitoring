@@ -1,6 +1,10 @@
 import ee
+import hashlib
 import json
+import math
 import os
+from pathlib import Path
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +16,18 @@ from PIL import Image, ImageDraw, ImageFont
 import telegram
 import asyncio
 
+from storage import (
+    connect,
+    has_observation,
+    image_is_complete,
+    save_observation,
+    update_delivery_status,
+)
+
+
+CLOUD_SCORE_THRESHOLD = float(os.environ.get("CLOUD_SCORE_THRESHOLD", "0.60"))
+if not 0 <= CLOUD_SCORE_THRESHOLD <= 1:
+    raise ValueError("CLOUD_SCORE_THRESHOLD must be between 0 and 1.")
 
 # ── GEE Authentication ────────────────────────────────────────────────────────
 def init_gee():
@@ -54,82 +70,112 @@ def gdf_to_ee_fc(gdf, name_col):
 
 # ── Satellite Image Detection ─────────────────────────────────────────────────
 def get_latest_image(aoi):
-    """Query last 14 days for a Sentinel-2 or Landsat 8/9 image with <20% cloud cover."""
+    """Find the latest cloud-filtered Sentinel-2 or Landsat 8/9 image."""
     now   = datetime.now(timezone.utc)
     start = (now - timedelta(days=14)).strftime("%Y-%m-%d")
     end   = now.strftime("%Y-%m-%d")
 
     def prep_s2(img):
-        scl = img.select('SCL')
-        mask = scl.neq(3).And(scl.neq(8)).And(scl.neq(9)).And(scl.neq(10))
+        cloud_score = ee.Image(img.get("cloud_score")).select("cs_cdf")
+        mask = cloud_score.gte(CLOUD_SCORE_THRESHOLD)
         return img.updateMask(mask).divide(10000).select(
             ['B2', 'B3', 'B4', 'B5', 'B8', 'B11'],
             ['BLUE', 'GREEN', 'RED', 'RE1', 'NIR', 'SWIR1']
-        ).set('system:time_start', img.get('system:time_start'))
-        
-    def prep_landsat(img):
-        qa = img.select('QA_PIXEL')
-        cloudShadowBitMask = (1 << 4)
-        cloudsBitMask = (1 << 3)
-        dilatedCloudBitMask = (1 << 1)
-        mask = qa.bitwiseAnd(cloudShadowBitMask).eq(0) \
-                 .And(qa.bitwiseAnd(cloudsBitMask).eq(0)) \
-                 .And(qa.bitwiseAnd(dilatedCloudBitMask).eq(0))
-        opticalBands = img.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6']).multiply(0.0000275).add(-0.2)
-        # We duplicate SR_B4 for RE1 since Landsat lacks RedEdge
-        return opticalBands.updateMask(mask).select(
-            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B4', 'SR_B5', 'SR_B6'],
-            ['BLUE', 'GREEN', 'RED', 'RE1', 'NIR', 'SWIR1']
-        ).set('system:time_start', img.get('system:time_start'))
+        ).set({
+            "system:time_start": img.get("system:time_start"),
+            "satellite": "Sentinel-2",
+            "farm_monitor_key": ee.String("Sentinel-2:").cat(
+                ee.String(img.get("system:index"))
+            ),
+        })
 
-    s2_col = (
+    def prep_landsat(img, satellite):
+        qa = img.select('QA_PIXEL')
+        clear_mask = (
+            qa.bitwiseAnd(1 << 0).eq(0)
+            .And(qa.bitwiseAnd(1 << 1).eq(0))
+            .And(qa.bitwiseAnd(1 << 2).eq(0))
+            .And(qa.bitwiseAnd(1 << 3).eq(0))
+            .And(qa.bitwiseAnd(1 << 4).eq(0))
+            .And(qa.bitwiseAnd(1 << 5).eq(0))
+        )
+        optical_bands = (
+            img.select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6'])
+            .multiply(0.0000275)
+            .add(-0.2)
+        )
+        return optical_bands.updateMask(clear_mask).select(
+            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1']
+        ).set({
+            "system:time_start": img.get("system:time_start"),
+            "satellite": satellite,
+            "farm_monitor_key": ee.String(satellite).cat(":").cat(
+                ee.String(img.get("system:index"))
+            ),
+        })
+
+    s2_raw = (
         ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
           .filterBounds(aoi)
           .filterDate(start, end)
           .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 30))
-          .map(prep_s2)
     )
-    
+    cloud_score_col = (
+        ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED")
+        .filterBounds(aoi)
+        .filterDate(start, end)
+    )
+    s2_col = ee.ImageCollection(
+        ee.Join.saveFirst("cloud_score").apply(
+            primary=s2_raw,
+            secondary=cloud_score_col,
+            condition=ee.Filter.equals(
+                leftField="system:index",
+                rightField="system:index",
+            ),
+        )
+    ).filter(ee.Filter.notNull(["cloud_score"])).map(prep_s2)
+
     l8_col = (
         ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
           .filterBounds(aoi)
           .filterDate(start, end)
           .filter(ee.Filter.lt("CLOUD_COVER", 30))
-          .map(prep_landsat)
+          .map(lambda img: prep_landsat(img, "Landsat 8"))
     )
-    
     l9_col = (
         ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
           .filterBounds(aoi)
           .filterDate(start, end)
           .filter(ee.Filter.lt("CLOUD_COVER", 30))
-          .map(prep_landsat)
+          .map(lambda img: prep_landsat(img, "Landsat 9"))
     )
 
     merged_col = s2_col.merge(l8_col).merge(l9_col).sort("system:time_start", False)
 
     if merged_col.size().getInfo() == 0:
-        print("[INFO] No new images in last 14 days. Exiting.")
-        sys.exit(0)
+        print("[INFO] No suitable image found in the last 14 days.")
+        return None, None, None, None
         
     image = merged_col.first()
     date_str = ee.Date(image.get("system:time_start")).format("YYYY-MM-dd").getInfo()
+    satellite = image.get("satellite").getInfo()
+    image_key = image.get("farm_monitor_key").getInfo()
     print(f"[INFO] Latest image date: {date_str}")
-    return image, date_str
+    print(f"[INFO] Satellite: {satellite}")
+    return image, date_str, satellite, image_key
 
 
 # ── Index Computation (server-side on GEE) ────────────────────────────────────
-def process_image(img, aoi):
-    """Compute 6 vegetation indices and resample to 2m resolution."""
-    # Resample to 2m before computing indices for smooth boundaries
-    # We must get the projection from a specific band because Sentinel-2/Landsat bands have different native scales.
+def process_image(img, aoi, satellite):
+    """Compute available vegetation indices on a 5 m grid."""
     crs = img.select('NIR').projection()
     img_5m = img.resample('bilinear').reproject(crs=crs, scale=5).clip(aoi)
 
     ndvi = img_5m.normalizedDifference(['NIR', 'RED']).rename('NDVI')
     ndmi = img_5m.normalizedDifference(['NIR', 'SWIR1']).rename('NDMI')
     ndwi = img_5m.normalizedDifference(['GREEN', 'NIR']).rename('NDWI')
-    ndre = img_5m.normalizedDifference(['NIR', 'RE1']).rename('NDRE')
     evi  = img_5m.expression(
         '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
         {'NIR': img_5m.select('NIR'), 'RED': img_5m.select('RED'), 'BLUE': img_5m.select('BLUE')}
@@ -139,7 +185,11 @@ def process_image(img, aoi):
         {'NIR': img_5m.select('NIR'), 'GREEN': img_5m.select('GREEN')}
     ).rename('GCI')
 
-    return img_5m.addBands([ndvi, ndmi, ndwi, ndre, evi, gci])
+    indices = [ndvi, ndmi, ndwi]
+    if satellite == "Sentinel-2":
+        indices.append(img_5m.normalizedDifference(['NIR', 'RE1']).rename('NDRE'))
+    indices.extend([evi, gci])
+    return img_5m.addBands(indices)
 
 
 # ── Colour Palette Configuration ──────────────────────────────────────────────
@@ -220,12 +270,11 @@ def fetch_index_png(processed_image, index_name, plot_geom, cfg):
     return Image.open(BytesIO(resp.content)).convert('RGB')
 
 
-def build_combined_png(processed_image, plot_name, date_str, plot_geom):
-    """Stitch 6 index panels into a 2×3 grid with title bar and colour legends."""
+def build_combined_png(processed_image, plot_name, date_str, plot_geom, index_names):
+    """Render every available index; a failed panel fails the whole report."""
     PANEL = 512
     LABEL = 60
     TITLE = 70
-    ORDER = ['NDVI', 'NDMI', 'NDWI', 'NDRE', 'EVI', 'GCI']
 
     try:
         font_title = ImageFont.load_default(size=32)
@@ -237,14 +286,10 @@ def build_combined_png(processed_image, plot_name, date_str, plot_geom):
         font_small = ImageFont.load_default()
 
     panels = []
-    for idx_name in ORDER:
+    for idx_name in index_names:
         cfg = INDEX_CONFIG[idx_name]
-        try:
-            panel = fetch_index_png(processed_image, idx_name, plot_geom, cfg)
-            panel = panel.resize((PANEL, PANEL))
-        except Exception as e:
-            print(f"[WARN] {idx_name} failed for {plot_name}: {e}")
-            panel = Image.new('RGB', (PANEL, PANEL), color='#444444')
+        panel = fetch_index_png(processed_image, idx_name, plot_geom, cfg)
+        panel = panel.resize((PANEL, PANEL))
 
         draw = ImageDraw.Draw(panel)
         # Black label bar at bottom of each panel
@@ -269,8 +314,9 @@ def build_combined_png(processed_image, plot_name, date_str, plot_geom):
 
         panels.append(panel)
 
-    # Assemble 2-column × 3-row grid
-    grid = Image.new('RGB', (PANEL * 2, PANEL * 3))
+    # Keep the same two-column layout while omitting unavailable indices.
+    rows = math.ceil(len(panels) / 2)
+    grid = Image.new('RGB', (PANEL * 2, PANEL * rows), color='#1a1a1a')
     for i, panel in enumerate(panels):
         grid.paste(panel, ((i % 2) * PANEL, (i // 2) * PANEL))
 
@@ -280,7 +326,7 @@ def build_combined_png(processed_image, plot_name, date_str, plot_geom):
     draw.text((20, 18), f"{plot_name}  \u2022  {date_str}", fill='white', font=font_title)
 
     # Final composite
-    final = Image.new('RGB', (PANEL * 2, PANEL * 3 + TITLE))
+    final = Image.new('RGB', (PANEL * 2, PANEL * rows + TITLE))
     final.paste(title, (0, 0))
     final.paste(grid,  (0, TITLE))
 
@@ -290,35 +336,152 @@ def build_combined_png(processed_image, plot_name, date_str, plot_geom):
     return buf
 
 
+def compute_plot_means(processed_image, plot_geom, index_names):
+    """Fetch one mean value per available index for a plot."""
+    band_names = [name.upper() for name in index_names]
+    means = processed_image.select(band_names).reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=plot_geom,
+        scale=5,
+        maxPixels=10000000,
+        bestEffort=True,
+    ).getInfo()
+    return {
+        name.lower(): means.get(name.upper())
+        for name in index_names
+    }
+
+
+def save_report(png_buffer, plot_name, date_str, image_key):
+    report_dir = Path(
+        os.environ.get("FARM_REPORT_DIR", "data/reports")
+    )
+    if not report_dir.is_absolute():
+        report_dir = Path(__file__).resolve().parent / report_dir
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", plot_name).strip("_") or "plot"
+    key_suffix = hashlib.sha256(image_key.encode("utf-8")).hexdigest()[:10]
+    report_path = report_dir / f"{safe_name}_{date_str}_{key_suffix}.png"
+    report_path.write_bytes(png_buffer.getvalue())
+    try:
+        return report_path.resolve().relative_to(Path(__file__).resolve().parent).as_posix()
+    except ValueError:
+        return str(report_path.resolve())
+
+
 # ── Telegram Delivery ─────────────────────────────────────────────────────────
-async def deliver_all(gdf, name_col, processed_image, date_str):
+async def deliver_all(
+    gdf,
+    name_col,
+    processed_image,
+    date_str,
+    satellite,
+    image_key,
+    connection,
+):
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
     chat_id   = os.environ.get('TELEGRAM_CHAT_ID')
 
-    if not bot_token or not chat_id:
-        print("[WARN] Telegram credentials not set. Skipping delivery.")
-        bot = None
-    else:
-        bot = telegram.Bot(token=bot_token)
+    bot_enabled = bool(bot_token and chat_id)
+    if not bot_enabled:
+        print("[INFO] Telegram credentials are not configured; reports will be saved locally.")
+        if bool(bot_token) != bool(chat_id):
+            print("[WARN] Set both Telegram credentials to enable delivery.")
 
-    for _, row in gdf.iterrows():
-        plot_name = str(row[name_col])
-        plot_geom = ee.Geometry(row.geometry.__geo_interface__)
-        print(f"[INFO] Rendering {plot_name}...")
+    bot = None
+    delivery_init_error = None
+    if bot_enabled:
+        candidate = telegram.Bot(token=bot_token)
         try:
-            png_buf = build_combined_png(processed_image, plot_name, date_str, plot_geom)
+            await candidate.initialize()
+            bot = candidate
+        except Exception as error:
+            delivery_init_error = str(error)
+            print(
+                "[ERROR] Telegram initialization failed; reports will still be "
+                f"saved locally: {error}"
+            )
+            try:
+                await candidate.shutdown()
+            except Exception as shutdown_error:
+                print(f"[ERROR] Telegram cleanup failed: {shutdown_error}")
+
+    index_names = ["NDVI", "NDMI", "NDWI", "EVI", "GCI"]
+    if satellite == "Sentinel-2":
+        index_names.insert(3, "NDRE")
+
+    failed_plots = []
+
+    async def process_plots(bot):
+        for _, row in gdf.iterrows():
+            plot_name = str(row[name_col])
+            if has_observation(connection, plot_name, image_key):
+                print(f"[INFO] Already recorded {plot_name} for {image_key}; skipping.")
+                continue
+
+            plot_geom = ee.Geometry(row.geometry.__geo_interface__)
+            print(f"[INFO] Rendering {plot_name}...")
+            try:
+                means = compute_plot_means(processed_image, plot_geom, index_names)
+                if means.get("ndvi") is None:
+                    raise ValueError("No clear NDVI pixels are available for this plot.")
+                png_buf = build_combined_png(
+                    processed_image, plot_name, date_str, plot_geom, index_names
+                )
+                report_path = save_report(png_buf, plot_name, date_str, image_key)
+            except Exception as error:
+                print(f"[ERROR] Report failed for {plot_name}; it was not recorded: {error}")
+                failed_plots.append(plot_name)
+                continue
+
+            observation = {
+                "plot_name": plot_name,
+                "image_key": image_key,
+                "image_date": date_str,
+                "satellite": satellite,
+                "report_path": report_path,
+                "delivery_status": (
+                    "pending"
+                    if bot
+                    else "failed" if delivery_init_error else "not_configured"
+                ),
+                "delivery_error": delivery_init_error,
+                **means,
+            }
+            try:
+                save_observation(connection, observation)
+            except Exception as error:
+                print(f"[ERROR] Could not save results for {plot_name}: {error}")
+                failed_plots.append(plot_name)
+                continue
+
             if bot:
                 caption = f"\U0001f6f0 {plot_name}\n\U0001f4c5 {date_str}"
-                await bot.send_photo(chat_id=chat_id, photo=png_buf, caption=caption)
-                print(f"[INFO] Sent Telegram message for {plot_name}")
+                try:
+                    png_buf.seek(0)
+                    await bot.send_photo(chat_id=chat_id, photo=png_buf, caption=caption)
+                    update_delivery_status(connection, plot_name, image_key, "sent")
+                    print(f"[INFO] Sent Telegram report for {plot_name}")
+                except Exception as error:
+                    update_delivery_status(
+                        connection, plot_name, image_key, "failed", str(error)
+                    )
+                    print(f"[ERROR] Telegram delivery failed for {plot_name}: {error}")
             else:
-                print(f"[INFO] Rendered PNG for {plot_name} (no Telegram configured).")
-        except Exception as e:
-            print(f"[ERROR] Failed to deliver {plot_name}: {e}")
+                print(f"[INFO] Saved report and index history for {plot_name}.")
+
+    try:
+        await process_plots(bot)
+    finally:
+        if bot:
+            await bot.shutdown()
+
+    return failed_plots
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
-def main():
+def run_pipeline(connection):
     try:
         init_gee()
         print("[INFO] GEE authenticated successfully.")
@@ -327,30 +490,67 @@ def main():
         sys.exit(1)
 
     try:
-        gdf = gpd.read_file("data/farms.geojson")
+        farms_path = Path(__file__).resolve().parent / "data" / "farms.geojson"
+        gdf = gpd.read_file(farms_path)
         gdf['geometry'] = gdf['geometry'].apply(drop_z)
         name_col = 'Plot_name' if 'Plot_name' in gdf.columns else gdf.columns[0]
+        if gdf.empty:
+            raise ValueError("Farm GeoJSON contains no plots.")
+        if gdf[name_col].isna().any() or gdf[name_col].astype(str).duplicated().any():
+            raise ValueError("Farm plot names must be present and unique.")
+        gdf[name_col] = gdf[name_col].astype(str)
         aoi = gdf_to_ee_fc(gdf, name_col)
     except Exception as e:
         print(f"[ERROR] Loading geometry failed: {e}")
         sys.exit(1)
 
     try:
-        image, date_str = get_latest_image(aoi)
-    except SystemExit:
-        sys.exit(0)
+        image, date_str, satellite, image_key = get_latest_image(aoi)
     except Exception as e:
         print(f"[ERROR] Getting latest image failed: {e}")
         sys.exit(1)
 
+    if image is None:
+        return
+
+    plot_names = gdf[name_col].tolist()
+    if image_is_complete(connection, image_key, plot_names):
+        print(f"[INFO] Latest image {image_key} was already processed; no report sent.")
+        return
+
     try:
-        processed_image = process_image(image, aoi)
+        processed_image = process_image(image, aoi, satellite)
     except Exception as e:
         print(f"[ERROR] Processing image failed: {e}")
         sys.exit(1)
 
-    asyncio.run(deliver_all(gdf, name_col, processed_image, date_str))
+    failed_plots = asyncio.run(
+        deliver_all(
+            gdf,
+            name_col,
+            processed_image,
+            date_str,
+            satellite,
+            image_key,
+            connection,
+        )
+    )
+    if failed_plots:
+        print(f"[ERROR] Failed to process {len(failed_plots)} plot(s): {failed_plots}")
+        sys.exit(1)
     print(f"[INFO] Pipeline complete. {len(gdf)} plots processed.")
+
+
+def main():
+    if not 0 <= CLOUD_SCORE_THRESHOLD <= 1:
+        print("[ERROR] CLOUD_SCORE_THRESHOLD must be between 0 and 1.")
+        sys.exit(1)
+
+    connection = connect()
+    try:
+        run_pipeline(connection)
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

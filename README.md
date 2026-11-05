@@ -1,78 +1,124 @@
-# \U0001f33e Farm Monitoring Pipeline (V2)
+# Farm Monitoring Pipeline
 
-An automated, high-resolution satellite imagery pipeline built on **Google Earth Engine (GEE)** and Python for continuous, near-real-time monitoring of agricultural farm plots. 
+A student project for monitoring farm plots with Google Earth Engine (GEE). It
+selects the latest suitable satellite image, applies cloud masking, calculates
+vegetation indices, saves plot reports and measurements to SQLite, and offers a
+Streamlit dashboard for reviewing history and possible NDVI drops.
 
-This pipeline automatically ingests imagery from multiple satellite constellations, harmonizes the data, applies cloud masking, resamples the imagery to a sharp 2-meter resolution, and calculates a suite of crucial vegetation indices before delivering heatmaps via Telegram.
+## Features
 
----
+- Sentinel-2 Surface Reflectance and Landsat 8/9 imagery from GEE.
+- Sentinel-2 Cloud Score+ masking, configurable with `CLOUD_SCORE_THRESHOLD`
+  (default `0.60`, valid range `0` to `1`). Landsat uses its `QA_PIXEL` cloud,
+  cirrus, shadow, and snow flags.
+- 5 m output grid for processing and visualisation. Resampling does not add
+  spatial detail beyond the source image: Sentinel-2 is natively 10 m or
+  coarser for some bands, and Landsat is natively 30 m.
+- NDVI, NDMI, NDWI, EVI, and GCI for Sentinel-2 and Landsat; NDRE is calculated
+  and shown only for Sentinel-2, which provides a red-edge band.
+- One combined heatmap report per plot and acquisition, plus per-plot index
+  measurements and satellite/date metadata in SQLite.
+- Duplicate prevention: completed plot/image pairs are recorded and the latest
+  already-completed image is not reported again. Failed plot reports are not
+  recorded as complete, so they can be retried.
+- Optional Telegram delivery and a dashboard for index trends, plot comparison,
+  latest heatmaps, delivery status, and configurable NDVI-drop review signals.
+- GitHub Actions for tests and scheduled processing.
 
-## \u2728 Key Features
+## Requirements and setup
 
-- **Multi-Satellite Workflow**: Maximizes cloud-free image availability by seamlessly querying data from **Sentinel-2**, **Landsat 8**, and **Landsat 9**.
-- **High-Resolution (2m) Resampling**: Downscales native 10m/30m optical data to a 2-meter grid via bilinear interpolation, ensuring perfect, artifact-free vector boundaries for individual farm polygons.
-- **Robust Cloud Masking**: Automatically interprets `SCL` (Sentinel) and `QA_PIXEL` (Landsat) bitmasks to strip out clouds, cirrus, and dilated cloud shadows.
-- **Automated Vegetation Indices**: Calculates 6 critical agronomic indicators:
-  - `NDVI` (Normalized Difference Vegetation Index)
-  - `NDMI` (Normalized Difference Moisture Index)
-  - `NDWI` (Normalized Difference Water Index)
-  - `NDRE` (Normalized Difference Red Edge)
-  - `EVI` (Enhanced Vegetation Index)
-  - `GCI` (Green Chlorophyll Index)
-- **Telegram Delivery**: Generates combined, aesthetically pleasing 2x3 grid visualizations (with legends and titles) and delivers them automatically to your Telegram via a Bot.
-- **CI/CD Integrated**: Includes a GitHub Action workflow to automatically lint code on push.
+Use Python 3.10 or later.
 
----
-
-## \U0001f4c2 Project Structure
-
-```text
-Farm-Monitoring-V1/
-├── pipeline.py             # Main execution script and GEE processing logic
-├── requirements.txt        # Python dependencies
-├── README.md               # Project documentation
-├── data/
-│   └── farms.geojson       # Vector geometries of the farm plots to monitor
-└── .github/
-    └── workflows/          # GitHub Actions CI/CD configurations
+```bash
+python -m pip install -r requirements.txt
 ```
 
----
+The pipeline requires a Google Earth Engine account and project. For local
+development, the first run can prompt for browser authentication. For GitHub
+Actions, add these repository Actions secrets:
 
-## \u2699\ufe0f Prerequisites & Setup
+- `GEE_SERVICE_ACCOUNT_KEY`: service account JSON key as a single JSON string.
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`: optional; omit both to save
+  reports without Telegram delivery.
+- `CLOUD_SCORE_THRESHOLD`: optional repository Actions variable, from `0` to
+  `1`; defaults to `0.60`.
 
-1. **Python 3.9+** is required.
-2. Install the necessary dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Google Earth Engine**: 
-   - Ensure you have an active GEE account.
-   - For server environments, set the `GEE_SERVICE_ACCOUNT_KEY` environment variable with your JSON key.
-   - For local development, the script will automatically trigger a browser-based authentication fallback `ee.Authenticate()`.
-4. **Telegram Integration** (Optional):
-   Set the following environment variables to enable delivery:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_ID`
+The project ID in the service account key is used by the pipeline when
+initialising GEE.
 
----
+Run the pipeline from any working directory:
 
-## \U0001f680 Usage
-
-To execute the pipeline locally:
 ```bash
 python pipeline.py
 ```
 
-**How it works:**
-1. The script reads your custom farm geometries from `data/farms.geojson`.
-2. It queries GEE for the latest available clear image (under 20% cloud cover) from the past 14 days.
-3. The image is masked, harmonized, and spatially resampled to 2 meters.
-4. Vegetation indices are calculated server-side.
-5. Thumbnails are fetched, stitched into a single PNG presentation, and printed/messaged to the user.
+`CLOUD_SCORE_THRESHOLD` can be set in the environment to tune Sentinel-2
+Cloud Score+ masking. Higher values are stricter and may mask more pixels. For
+example, in PowerShell:
 
----
+```powershell
+$env:CLOUD_SCORE_THRESHOLD = "0.65"
+python pipeline.py
+```
 
-## \U0001f9ec Data Sources
-- **COPERNICUS/S2_SR_HARMONIZED** (Sentinel-2 Surface Reflectance)
-- **LANDSAT/LC08/C02/T1_L2** (Landsat 8 Surface Reflectance)
-- **LANDSAT/LC09/C02/T1_L2** (Landsat 9 Surface Reflectance)
+The acquisition search covers the most recent 14 days and uses the latest
+available scene with a scene-level cloud-cover value under 30%. A cloud score
+is a pixel-level mask, not a guarantee that every plot will have enough clear
+pixels for a useful report.
+
+## Saved results
+
+By default, the pipeline writes:
+
+- `data/farm_monitoring.db` — SQLite observations for each plot and image.
+- `data/reports/` — combined PNG heatmaps referenced by the database.
+
+The database has one row for each successfully rendered plot/image pair. It
+stores the acquisition date and satellite, mean available index values, report
+path, and Telegram delivery status. Landsat rows leave `ndre` empty. Failed
+heatmap panels fail the entire plot report instead of being replaced with a
+misleading placeholder; an unrecorded report can be retried while that image
+remains the latest available scene.
+
+The scheduled GitHub Actions workflow commits changes to the database and
+reports back to the repository so subsequent daily runs and the dashboard can
+reuse the history. It needs repository **Contents: write** permission. If you
+run the pipeline elsewhere, keep the database and reports together and copy
+them to the same machine/environment where the dashboard runs.
+
+Override the storage locations with `FARM_MONITOR_DB` and `FARM_REPORT_DIR`.
+Relative paths are resolved from the repository folder.
+
+## Dashboard
+
+Start the local dashboard after at least one successful pipeline run:
+
+```bash
+python -m streamlit run dashboard.py
+```
+
+Select a plot to view its index history and latest heatmap. The comparison
+section charts NDVI for selected plots. The alert threshold and baseline period
+are adjustable in the sidebar. A review signal is raised when the latest NDVI
+is below the mean of at least three earlier observations within the selected
+baseline period by the configured absolute amount. It is an indicator to
+investigate, not a crop diagnosis.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Data sources and interpretation
+
+- `COPERNICUS/S2_SR_HARMONIZED` and
+  `GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED`
+- `LANDSAT/LC08/C02/T1_L2`
+- `LANDSAT/LC09/C02/T1_L2`
+
+Index values are satellite-derived indicators and can vary with season,
+atmosphere, crop type, and image availability. They should not be treated as a
+standalone diagnosis of crop health.
+
+Farm boundaries are read from [`data/farms.geojson`](./data/farms.geojson).

@@ -4,3 +4,5 @@ shapely>=2.0
 Pillow>=10.0
 python-telegram-bot>=20.0
 requests>=2.31
+streamlit>=1.50
+pandas>=2.0
