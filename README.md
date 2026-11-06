@@ -1,4 +1,4 @@
-# \U0001f33e Farm Monitoring Pipeline (V2)
+Farm Monitoring Pipeline (V2)
 
 An automated, high-resolution satellite imagery pipeline built on **Google Earth Engine (GEE)** and Python for continuous, near-real-time monitoring of agricultural farm plots. 
 
@@ -6,7 +6,7 @@ This pipeline automatically ingests imagery from multiple satellite constellatio
 
 ---
 
-## \u2728 Key Features
+Key Features
 
 - **Multi-Satellite Workflow**: Maximizes cloud-free image availability by seamlessly querying data from **Sentinel-2**, **Landsat 8**, and **Landsat 9**.
 - **High-Resolution (2m) Resampling**: Downscales native 10m/30m optical data to a 2-meter grid via bilinear interpolation, ensuring perfect, artifact-free vector boundaries for individual farm polygons.
@@ -23,7 +23,7 @@ This pipeline automatically ingests imagery from multiple satellite constellatio
 
 ---
 
-## \U0001f4c2 Project Structure
+Project Structure
 
 ```text
 Farm-Monitoring-V1/
@@ -38,7 +38,7 @@ Farm-Monitoring-V1/
 
 ---
 
-## \u2699\ufe0f Prerequisites & Setup
+Prerequisites & Setup
 
 1. **Python 3.9+** is required.
 2. Install the necessary dependencies:
@@ -56,7 +56,7 @@ Farm-Monitoring-V1/
 
 ---
 
-## \U0001f680 Usage
+Usage
 
 To execute the pipeline locally:
 ```bash
